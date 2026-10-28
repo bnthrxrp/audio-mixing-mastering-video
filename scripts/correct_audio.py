@@ -53,6 +53,8 @@ def main():
     if a.output.suffix.lower() != '.wav' or a.output.exists():
         p.error('output must be a new .wav')
     voice = probe(a.voice, None, max_seconds=a.max_seconds)
+    if abs(voice['start_s']) > 0.001:
+        raise AudioError('voice stem must start at zero; align/export the stems before processing')
     v = scan(voice, a.timeout, a.max_seconds)
     activity = [level(frame) > a.voice_gate_dbfs for frame in v['frames']]
     if sum(activity) < 10:
@@ -70,17 +72,24 @@ def main():
             source, before = voice, v
         else:
             music = probe(a.music, None, max_seconds=a.max_seconds)
+            if abs(music['start_s']) > 0.001:
+                raise AudioError('music stem must start at zero; align/export the stems before processing')
             m = scan(music, a.timeout, a.max_seconds)
             same_timeline(voice, music, v, m)
+            # Some FFmpeg versions forward EOF while a sidechain FIFO still has audio.
+            # Pad both inputs before the filter, then trim to the original music sample count.
+            graph = (f'[0:a:0]apad=pad_dur=1[main];[1:a:0]apad=pad_dur=1[side];'
+                     f'[main][side]sidechaincompress=threshold={a.sidechain_threshold}:ratio={a.ratio}:'
+                     f'attack=20:release=250,atrim=end_sample={m["samples_per_channel"]}[duck]')
             cmd = common + ['-i', music['path'], '-protocol_whitelist', 'file,pipe', '-i', voice['path'],
-                '-filter_complex', f'[0:a:0][1:a:0]sidechaincompress=threshold={a.sidechain_threshold}:ratio={a.ratio}:attack=20:release=250[duck]',
+                '-filter_complex', graph,
                 '-map', '[duck]', '-c:a', 'pcm_f32le', '-n', str(tmp)]
             source, before = music, m
         run(cmd, a.timeout)
         after_meta = probe(tmp, 0, max_seconds=a.max_seconds)
         after = scan(after_meta, a.timeout, a.max_seconds)
         if (after_meta['channels'] != source['channels'] or after_meta['sample_rate'] != source['sample_rate'] or
-            abs(after['duration_s'] - before['duration_s']) > 0.05):
+            abs(after['duration_s'] - before['duration_s']) > 0.001):
             raise AudioError('candidate properties changed: '
                 f"channels {source['channels']}→{after_meta['channels']}, "
                 f"rate {source['sample_rate']}→{after_meta['sample_rate']}, "

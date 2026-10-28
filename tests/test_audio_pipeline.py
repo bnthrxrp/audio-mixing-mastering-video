@@ -109,6 +109,13 @@ class PipelineTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertLess(report['qc']['active_median_change_db'], -.5)
         self.assertTrue(out.exists())
+        duration = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', str(out)], capture_output=True, text=True, check=True)
+        self.assertAlmostEqual(float(duration.stdout), 4.0, delta=.001)
+        tail = subprocess.run(['ffmpeg', '-v', 'error', '-ss', '3.9', '-i', str(out),
+            '-f', 'f32le', '-acodec', 'pcm_f32le', '-'], capture_output=True, check=True).stdout
+        tail_samples = struct.unpack('<' + 'f' * (len(tail) // 4), tail)
+        self.assertGreater(math.sqrt(sum(x*x for x in tail_samples) / len(tail_samples)), .05)
         mismatch = self.p / 'short.wav'
         wav(mismatch, lambda t, i: .1 * math.sin(t), seconds=2)
         bad = self.p / 'bad.wav'
