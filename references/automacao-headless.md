@@ -1,112 +1,80 @@
-# Automação headless: áudio para vídeo
+# Automação headless executável
 
 ## Índice
-Arquitetura; exemplos FFmpeg; normalização duas passagens; ferramentas; detecção; processamento de vídeo; escala; modelo de aprovação; fontes.
+Requisitos e comandos; stems e tratamento; WER; lote; Docker; vídeo; testes; limites.
 
-## Arquitetura e políticas
-Entrada → inventário/validação → extração sem perda → análise → plano e risco → processamento → medição independente e comparação → decisão QC → publicação/entrega autorizada. Para lote: ingestão em armazenamento → manifesto/hash → fila → workers idempotentes isolados → artefatos intermediários → QC e relatório → destino. Não exija GUI: ffprobe/FFmpeg, SoX, Rubber Band e Python. Instale somente dependências necessárias; confirme `ffmpeg -version`, `ffmpeg -filters`, codec e builds (libebur128, libsoxr, rubberband) e licenças. Pin imagem por digest, pacotes/modelos por versão e checksum quando aplicável. Uma imagem mínima com FFmpeg e Python pode servir; acrescente SoX, rubberband-cli e bibliotecas Python só quando necessário. Versões e licenças dependem do ambiente, especialmente distribuição comercial do Rubber Band e codecs.
+## Requisitos e execução
+Linux/POSIX, Python 3.10+, `ffmpeg` e `ffprobe` no PATH; ebur128 com medição de true peak e filtros `loudnorm`, `afftdn` e `sidechaincompress` no build. Confira `ffmpeg -filters` e `ffmpeg -version`. O núcleo não faz download de modelos e usa apenas biblioteca padrão Python. O VAD WebRTC é opcional e precisa de pacote compatível `webrtcvad`; teste seu binário e licença no ambiente. Execute a partir da raiz da Skill.
 
-Preserve cópia e checksums; nunca sobrescreva input; nome único e gravação temporária + promoção atômica após QC. Informe política de reprocessamento e parâmetros; não transmita áudio confidencial a serviços externos sem autorização. Trate arquivos não confiáveis como dados: passe listas de argumentos sem shell em Python, não interpole metadados em comandos, limite CPU/memória/tempo/disco e rede, use container não privilegiado, mounts mínimos, tamanho e duração máximos. Não exponha segredos nos logs. Detecte múltiplos áudios e selecione a stream explicitamente; sem áudio, codec incompatível, layout desconhecido, arquivos vazios, LUFS não finito ou diferença de duração/sync → falha clara e quarentena, sem publicar.
-
-## Comandos básicos (substitua caminhos; scripts Bash devem usar aspas)
 ```bash
-# Inventário JSON; selecione a stream que representa a mix autorizada.
-ffprobe -v error -show_format -show_streams -of json 'entrada.mp4' > 'inventario.json'
-# WAV 24-bit, preservar canais e amostragem originais; tamanho pode ser grande.
-ffmpeg -nostdin -n -i 'entrada.mp4' -map 0:a:0 -vn -c:a pcm_s24le 'audio.wav'
-# Loudness e true peak por programa completo; depende do build.
-ffmpeg -nostdin -hide_banner -i 'audio.wav' -filter_complex 'ebur128=peak=true' -f null - 2> 'medicao.txt'
-# Silêncios potenciais: −45 dB por pelo menos 1 s (ajustar ao contexto).
-ffmpeg -nostdin -hide_banner -i 'audio.wav' -af 'silencedetect=noise=-45dB:d=1' -f null - 2> 'silencios.txt'
-# Ruído estacionário, apenas se identificado: teste intensidade e artefatos.
-ffmpeg -nostdin -n -i 'audio.wav' -af 'afftdn=nr=6' -c:a pcm_s24le 'denoise.wav'
+python3 scripts/audio_qc.py entrada.mp4 --stream 0 --target-i -16 --target-tp -2 --tolerance-lu 0.5 --strict --report entrada.qc.json
+python3 scripts/normalize_loudness.py entrada.wav master.wav --target-i -16 --target-tp -2 --target-lra 11 --timeout 600
+python3 scripts/audio_qc.py master.wav --target-i -16 --target-tp -2 --strict --report master.qc.json
 ```
-Medir antes/depois em arquivo efetivamente entregue. `silencedetect` é limiar de amplitude, não VAD; silêncio narrativo é legítimo. Ajustar canal, layout e `dual_mono` para caso real; não forçar estéreo em multicanal. FFmpeg ebur128 true peak e loudnorm são medidores BS.1770 de programa, não implementam automaticamente âncora de diálogo ATSC nem certificam conformidade. Para canais imersivos e metadados, use ferramentas de medição compatíveis com o formato.
 
-## Normalização duas passagens
-Use `python scripts/normalize_loudness.py input.wav output.wav --target-i -16 --target-tp -2 --target-lra 11` como exemplo web estéreo, sujeito às especificações. O script faz medição, normaliza, rejeita fallback dinâmico por padrão, mede novamente e produz JSON; taxa padrão 48 kHz configurável. O processamento é em WAV e não altera o vídeo. Ajuste alvos conscientemente: LRA não é meta obrigatória; o valor de `LRA` do loudnorm limita o modo de normalização, e ao não satisfazer as condições de modo linear o FFmpeg pode trocar para dinâmico. A opção `--allow-dynamic` permite essa troca de forma explícita; compressão dinâmica pode alterar a intenção. Se arquivo silencioso ou muito curto não produzir métricas finitas, tratar como indeterminado. O script não garante conformidade contratual ou qualidade auditiva; tolerância QC e alinhamento devem ser personalizados. Análise final independente e codec são indispensáveis.
+`--stream` é índice entre streams de áudio; omita se existe exatamente uma. Saída JSON em stdout ou em `--report` novo. `--strict` retorna 2 se LUFS e TP não forem ambos `pass`; retorna 1 em erro, inclusive decodificação. Sem `--strict`, não confunda código 0 com QC aprovado. Para mono destinado à reprodução dual-mono use `--dual-mono` nos dois scripts. O medidor ebur128 dá resolução de saída de 0,1; ele não implementa âncora de diálogo ATSC ou necessariamente a edição mais nova de todos os perfis BS.1770. Verifique canais, matriz e medidor antes de qualquer alegação de conformidade.
 
-Manual: primeira passagem `ffmpeg -i audio.wav -af 'loudnorm=I=-16:TP=-2:LRA=11:print_format=json' -f null -`, extraia `input_i`, `input_tp`, `input_lra`, `input_thresh` e `target_offset`; segunda passagem use esses cinco valores para `measured_I`, `measured_TP`, `measured_LRA`, `measured_thresh`, `offset`, `linear=true`. O script automatiza parsing, validação e checagem da troca de modo. `loudnorm` em modo dinâmico pode fazer upsample; defina `-ar` para a saída. Nunca aplique os valores da primeira passagem a outro arquivo ou a outra ordem de filtros.
+A normalização rejeita automaticamente fallback dinâmico de `loudnorm`; `--allow-dynamic` é opt-in porque pode alterar dinâmica. `--target-lra` é parâmetro do filtro, não aprovação de LRA. O WAV float de 32 bits é escrito em diretório temporário no mesmo filesystem e promovido sem sobrescrita após teste independente de LUFS/TP, duração e canais; adicione outro gate se forem obrigatórios. Converta ao formato final somente depois de verificar headroom e meça novamente. A precisão de 0,1 no relatório não é garantia de medição metrológica. Ajuste taxa `--sample-rate`, tolerância, `--max-seconds` e `--timeout` conforme a política.
 
-## Integrar áudio ao vídeo
-Com autorização e após conferir formato, duração, timecode e canais, exemplo para vídeo MP4 com um único áudio substituído, preservando vídeo codificado:
+## Diagnóstico e tratamento de stems
+
 ```bash
-ffmpeg -nostdin -n -i 'entrada.mp4' -i 'audio-master.wav' -map 0:v:0 -map 1:a:0 -map_metadata 0 -c:v copy -c:a aac -b:a 192k 'saida.mp4'
-ffmpeg -nostdin -hide_banner -i 'saida.mp4' -map 0:a:0 -af 'ebur128=peak=true' -f null - 2> 'qc_saida.txt'
+python3 scripts/audio_qc.py mix.wav --voice-stem voz.wav --music-stem musica.wav --stems-synchronized --vad energy --report stems.json
+# Opcional: --vad webrtc requer import webrtcvad instalado; não há fallback silencioso.
+python3 scripts/correct_audio.py denoise voz.wav voz-limpa.wav --noise-confirmed --noise-floor-dbfs -40 --reduction-db 6
+python3 scripts/gain_voice.py voz.wav voz-amplificada.wav --isolated-voice --gain-db 3 --target-tp -2
+python3 scripts/correct_audio.py duck voz.wav musica.wav musica-abaixada.wav --stems-synchronized
 ```
-Este exemplo não preserva automaticamente legendas, outras faixas de áudio, capítulos, metadados por stream, attachments nem todos os fluxos. Mapeie e verifique explicitamente os desejados; não use `-shortest` como substituto de sincronismo e não force início de timestamps para zero sem entender offsets. Compare `ffprobe` antes/depois e início/fim; perdas de AAC podem elevar dBTP. Ao receber stems separados, preserve timeline, offsets, ganho e layout; ducking automatizado em música separada é possível com `sidechaincompress`, mas avalie tempos e bombeamento. Não afirme poder baixar apenas a música numa mix estéreo sem separação, que cria artefatos.
 
-## Ferramentas e limites
-- **SoX**: CLI de conversão, filtros/equalização e `compand`; `noiseprof`/`noisered` exigem amostra representativa de ruído, ou removem fala. `sox input.wav output.wav gain -3` é ganho fixo, não normalização LUFS. Use `sox --help-effect` para sintaxe da versão.
-- **Rubber Band**: `rubberband --time 1.02 input.wav output.wav` aumenta duração por fator 1,02; `--pitch 1` sobe um semitom. Verifique `rubberband --help`, tempo/sincronismo e artefatos, e licenciamento. Não estique trilha total sem adaptar vídeo; time-stretch é correção de timing autorizada, não remédio automático para drift sem análise.
-- **Whisper local**: transcrição e timestamps aproximados para triagem, alinhamento e comparação com roteiro; `whisper audio.wav --model small --language Portuguese --output_format json` (modelo local, download/requisitos de hardware). Não diagnostica diretamente nível de voz ou inteligibilidade, não garante transcrição correta, não identifica locutores automaticamente; silenciosos podem gerar alucinações. Para forced alignment/diarização use ferramentas apropriadas e avalie confiança/privacidade.
-- **PyDub**: segmentação e automação simples, geralmente requer FFmpeg; não usar `dBFS` como LUFS, preservação de canais e precisão devem ser verificadas. **librosa**: RMS, centroides, espectrogramas e indicadores; não mede qualidade subjetiva ou ruído automaticamente, cuidado com reamostragem e conversão mono padrão; `sr=None, mono=False` quando apropriado. **scipy.signal**: filtros SOS, espectro, STFT; documente fase, condições de borda e transientes. **pyloudnorm / libebur128**: úteis para loudness, conferir versão, canais, true peak e aderência ao perfil; não assumir suporte a tudo. OpenAudio Tools é termo amplo: identifique projeto, documentação, licença e manutenção antes de recomendar um pacote ou inventar uma API.
+`--stems-synchronized` atesta que conteúdo e ganhos se referem à mesma timeline; os scripts só verificam duração e timestamp, não podem confirmar alinhamento de conteúdo. `denoise` exige decisão externa de que ruído é indesejado. Ele só promove quando os mesmos quadros não vocais apresentam melhora mediana >=1 dB, voz candidata não perde mais de 1,5 dB na mediana, duração/canais/taxa são mantidos e pico não aumenta em excesso. `gain_voice.py` limita ganho a 6 dB e exige stem isolado e teto true peak; ganho também eleva ruído. `duck` cria **somente o stem de música processado**, não uma mix final. Requer sobreposição suficiente, redução mediana entre 0,5 e 10 dB durante voz e preservação aproximada das pausas. São gates energéticos, não teste de artefatos nem compreensão. Rejeição significa nenhum arquivo promovido. É possível que uma correção realmente útil não passe; não force thresholds para mascarar falhas.
 
-## Diagnóstico automático por evidência
-- Loudness: BS.1770 por programa e janelas; valor, método, unidade e alvo. Não inferir voz baixa a partir de LUFS do programa inteiro.
-- Clipping: conte amostras próximas ao full scale e trechos consecutivos por canal, registre limiar e timestamps; é suspeita, não prova, e áudio float pode exceder full scale legitimamente antes de conversão. Distorção analógica pode ocorrer sem amostras no teto.
-- Silêncio: duração em janelas + mapa de cena/VAD; ruído de fundo pode impedir detecção; não corte pausas automaticamente.
-- Ruído: estime piso em regiões não faladas identificadas por VAD e espectro; classifique com baixa confiança quando houver música ou ambiência. Denoise em cópia, imponha limites e avalie artefatos.
-- Voz baixa: obtenha stem ou VAD confiável e meça voz por região; compare com música e cena quando stems existem. Sem separação ou referência, registre hipótese. ASR não substitui essa medição.
-- Música competindo: stems permitem medir sobreposição e mascaramento; sem stems e sem separador validado, indicar desconhecido. Modelos de separação/diarização têm erro, falsos positivos e custo; não vendê-los como prova. Avalie mudanças de balanço e ducking em segmentos.
-- Fase e estéreo: correlação e teste de soma mono são indicadores; correlação negativa momentânea pode ser intencional, não equivale a falha.
+Misture os stems com roteamento/pan/ganhos aprovados e duração validada. Com dois WAV já alinhados e mesmo layout, um exemplo que não normaliza ganhos e pode produzir pico excessivo é:
 
-Retorne por arquivo: ID/hash, ferramentas/versões, streams e tempos, métricas antes/depois, hipóteses com confiança, processamento, mudanças no áudio, riscos, evidência, estado e lacunas. Sem escuta, sem nota de qualidade perceptiva nem garantia de inteligibilidade. Para processamentos agressivos, detecção ambígua, multicanal não suportado ou exigência contratual complexa: reportar e encaminhar a revisão humana ou agente com capacidade de escuta, sem afirmar aprovação. Aprovação automatizada é restrita aos critérios objetivos configurados.
-
-## Exemplo mínimo de container e lote
-Exemplo didático; para produção fixe digest da imagem e versões do sistema, verifique licenças e aplique limites de recursos. No contexto do build, copie `normalize_loudness.py` da pasta scripts da skill.
-```dockerfile
-FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
-COPY normalize_loudness.py /app/normalize_loudness.py
-USER 65534:65534
-ENTRYPOINT ["python", "/app/normalize_loudness.py"]
-```
-```yaml
-# compose.yaml — diretórios input/ e output/ locais; output gravável pelo UID 65534
-services:
-  audio:
-    build: .
-    network_mode: none
-    read_only: true
-    tmpfs: ["/tmp"]
-    volumes:
-      - ./input:/data/in:ro
-      - ./output:/data/out
-    command: ["/data/in/entrada.wav", "/data/out/saida.wav", "--target-i", "-16", "--target-tp", "-2", "--target-lra", "11"]
-```
-Execute `docker compose run --rm audio`; a saída é nova, sem sobrescrita. Essa configuração é exemplo para uma única entrada PCM; volumes, permissões, recursos, build e disponibilidade do Docker precisam ser adaptados ao ambiente.
-
-Lote sequencial seguro em Bash (WAV de entrada; ajuste caminhos e parâmetros, falhas ficam identificadas):
 ```bash
-#!/usr/bin/env bash
-set -u
-mkdir -p -- output
-shopt -s nullglob
-files=(input/*.wav)
-((${#files[@]})) || { printf '%s\n' 'Nenhum WAV encontrado' >&2; exit 1; }
-failed=0
-for file in "${files[@]}"; do
-  name=${file##*/}
-  if ! python normalize_loudness.py "$file" "output/$name" --target-i -16 --target-tp -2 --target-lra 11 > "output/$name.json"; then
-    printf 'Falha: %s\n' "$file" >&2
-    failed=1
-  fi
-done
-exit "$failed"
+ffmpeg -nostdin -n -i 'voz.wav' -i 'musica-abaixada.wav' -filter_complex '[0:a:0][1:a:0]amix=inputs=2:duration=longest:normalize=0[a]' -map '[a]' -c:a pcm_f32le 'mix-candidata.wav'
+python3 scripts/audio_qc.py mix-candidata.wav --target-i -16 --target-tp -2 --strict --report mix-qc.json
 ```
-Com concorrência, use fila e nomes únicos, incluindo hash e configuração; não rode vários jobs com o mesmo destino. JSON acima é um exemplo local simples, não auditoria completa.
 
-## Operação em escala e CI
-Divida jobs independentes por arquivo, limite concorrência por CPU/RAM/GPU e I/O, evite carregar arquivos longos inteiros em memória. Use fila durável, retries limitados com backoff, identificadores idempotentes por hash+config+versão, locks, checkpoints, atomicidade e limpeza de temporários. Desenhe observabilidade com logs estruturados, métricas, status, custo, versões, rastreabilidade, retenção e acesso. Docker/Kubernetes: volumes apenas necessários, non-root, recursos limitados, espaço temporário, política de rede, checks de saúde e segregação por tenant; defina tolerâncias de QC como configuração. CI com fixtures sintéticas e teste de integração: silêncio, clipping deliberado, mono/estéreo, áudio ausente, nomes com espaços, longos, codec, falha parcial, idempotência, sync e saída com limites; verifique que validação falha para arquivo corrompido ou fora da tolerância. Não afirme que um pipeline é pronto para produção sem testes em mídia real.
+Não some áudio float acima de 0 dBFS e depois grave diretamente em PCM inteiro: pode clipar antes do QC. Garanta headroom **antes** da soma e/ou renderize intermediário float, valide e limite conforme especificação. O exemplo acima só serve se os níveis já têm headroom suficiente; prefira intermediário `pcm_f32le` e medir antes da conversão.
 
-## Fontes
-- FFmpeg filtros e opções loudnorm, ebur128, afftdn, sidechaincompress, silencedetect: https://ffmpeg.org/ffmpeg-filters.html
-- FFprobe: https://ffmpeg.org/ffprobe.html
-- SoX manual: https://sox.sourceforge.net/sox.html
-- Rubber Band CLI/licenças: https://www.breakfastquay.com/rubberband/ e https://www.breakfastquay.com/rubberband/usage.txt
-- Whisper código: https://github.com/openai/whisper
-- PyDub: https://github.com/jiaaro/pydub
-- librosa: https://librosa.org/doc/latest/index.html
-- SciPy signal: https://docs.scipy.org/doc/scipy/reference/signal.html
-- pyloudnorm: https://github.com/csteinmetz1/pyloudnorm
+## Fala e WER
+
+`python3 scripts/transcribe_local.py voz.wav transcricao.json --model /models/whisper-small-ct2 --language pt --device cpu --compute-type int8 --vad-filter` executa ASR opcional com `faster-whisper` instalado e modelo convertido **local**, incluindo tokenizer/configuração. Pré-verifique pesos/licença; isole a rede do contêiner. O script extrai a stream para mono 16 kHz, executa worker com timeout, registra hashes de entrada/modelo, evita download e promove JSON privado sem sobrescrever. Timestamps são relativos à stream extraída e não resolvem offsets de vídeo. O núcleo não instala nem distribui modelo ou dependência ASR.
+
+Para obter texto do JSON com permissões restritas e comparar com uma referência:
+
+```bash
+umask 077
+python3 -c 'import json; from pathlib import Path; d=json.loads(Path("transcricao.json").read_text(encoding="utf-8")); Path("transcricao.txt").write_text(" ".join(s["text"] for s in d["segments"]), encoding="utf-8")'
+python3 scripts/speech_wer.py roteiro.txt transcricao.txt --warning-wer 0.2
+```
+
+WER usa distância de palavras com Unicode NFKC/casefold; limiar é exemplo, não norma. Referência vazia falha; menos de cinco palavras é indeterminado. ASR, diferenças de edição e normalização podem produzir falsos alertas; WER não é teste direto de inteligibilidade.
+
+## Lote local e logs
+
+```bash
+python3 scripts/batch_qc.py input/ reports/ --jobs 2 --target-i -16 --target-tp -2 --strict --max-attempts 2
+```
+
+Somente diretório de primeiro nível, sem envio à rede. Cria JSON por SHA-256 de conteúdo + configuração + versões/scripts; log JSONL registra id, estado, tentativas, tempo e gate. Arquivos idênticos compartilham relatório, cujo caminho identifica a primeira fonte analisada; caminhos podem aparecer **dentro do relatório**, restrinja ACL/retenção. Repetições consultam cache; promoção sem sobrescrita evita conflito. Timeout encerra grupo de processos e faz até três tentativas com backoff; erro de conteúdo e gate falho não geram retry. Cache corrompido ou fonte modificada gera falha. 0 = todos concluídos (e, se `--strict`, todos aprovados); 1 = falha. Não implementa fila distribuída, persistência de estados transitórios, leases, métricas Prometheus nem garantias de exatamente uma execução; veja arquitetura enterprise.
+
+## Docker e recursos
+
+`docker build -f assets/Dockerfile -t audio-qc .` usa exemplo que ainda precisa de digest/base e snapshot de pacotes fixados para produção. Com diretórios com permissões para UID 10001:
+
+```bash
+docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=256m --cpus 2 --memory 1g \
+  -v "$PWD/input:/data/in:ro" -v "$PWD/output:/data/out:rw" audio-qc \
+  /data/in/entrada.wav --target-i -16 --target-tp -2 --strict --report /data/out/qc.json
+```
+
+Contêiner não testado se Docker não estiver disponível. Em produção aplique seccomp, filesystem e rede restritos, limite de arquivo/duração, quotas e não-root. FFmpeg/FFprobe abrem arquivos locais; isole entradas não confiáveis por mount, usuário e namespaces. Logs, hashes e transcrições podem ser dados sensíveis.
+
+## Vídeo e sincronismo
+
+Processar WAV não substitui áudio do vídeo. Com contrato conhecido, `ffmpeg -i video.mp4 -i master.wav -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k saida.mp4` é exemplo restrito a uma faixa; não preserva automaticamente outras faixas/legendas/chapters. Mapeie tudo necessário, preserve PTS/start/timecode, não use `-shortest` para esconder drift e compare `ffprobe` e duração. Meça **após codec** porque TP e loudness podem mudar. Streams adicionais, multicanal ou formatos imersivos exigem validação específica.
+
+## Verificação
+
+`python3 -m unittest discover -s tests -v` usa fixtures sintéticas e FFmpeg reais: clipping, silêncio, fallback dinâmico, normalização/QC, correções, WER, idempotência e falhas. Acrescente fixtures representativas reais e testes de tolerância de medidor, codecs, sync, políticas e escala antes de produção. Nenhum teste sintético certifica qualidade auditiva.

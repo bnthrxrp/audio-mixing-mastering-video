@@ -1,8 +1,8 @@
 interface:
   display_name: Audio Mixing & Mastering for Video
-  short_description: Mixagem e masterização de áudio para vídeo
-  default_prompt: Use $audio-mixing-mastering-video para analisar e melhorar o áudio
-    do meu vídeo.
+  short_description: Áudio para vídeo, QC e automação headless
+  default_prompt: Use $audio-mixing-mastering-video para analisar, corrigir e validar
+    o áudio do meu vídeo em um fluxo headless.
   icon_small: assets/icon.svg
   icon_large: assets/icon.svg
 policy:

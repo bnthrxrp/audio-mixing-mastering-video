@@ -1,35 +1,31 @@
 # Audio Mixing & Mastering for Video
 
-Skill para agentes de IA especializados em pós-produção de áudio para vídeo, com foco em execução autônoma em Linux e ambientes headless.
+Skill de pós-produção audiovisual para agentes de IA, com ferramentas de diagnóstico, correção e QC executáveis em Linux/headless. O diretório completo é necessário: [SKILL.md](SKILL.md) encaminha para `references/`, `scripts/` e os contratos em `assets/`.
 
-## O que faz
+## Capacidades
 
-- Orienta diagnóstico, edição, sound design, mixagem, loudness, masterização e controle de qualidade para vídeo.
-- Propõe fluxos para redes sociais, cursos, documentários, podcasts, publicidade, streaming, cinema e broadcast.
-- Prioriza FFmpeg, SoX, Rubber Band, Whisper, Python, containers e ferramentas abertas. DAWs gráficas são referências opcionais.
-- Distingue resultados medidos de hipóteses e testes perceptivos. Valores para plataformas são pontos de partida, salvo especificação documentada.
+- Medição de loudness e true peak, detecção de indicadores de clipping, silêncio, ruído, voz baixa e competição de música, com estados explícitos para incerteza.
+- Normalização de duas passagens, redução conservadora de ruído e ducking em stems, ganho limitado de voz e verificação após render.
+- QC em lote local com relatórios JSON, logs JSONL, cache por conteúdo, timeout e retry limitado.
+- Regras para broadcast/streaming, ferramentas de IA, segurança, escala e hand-offs de agentes especializados.
 
-## Uso da skill
+As heurísticas não garantem inteligibilidade nem qualidade auditiva. O gate objetivo embutido cobre apenas loudness e true peak; outros requisitos precisam de verificações adicionais. A arquitetura de fila distribuída e multiagentes é um contrato de integração, não um serviço já implantado.
 
-Em um ambiente compatível com skills no formato `SKILL.md`, instale o diretório completo conforme as instruções do seu ambiente e invoque `audio-mixing-mastering-video`. A skill consulta os arquivos em `references/` e, quando aplicável, o script em `scripts/`.
+## Uso rápido
 
-Exemplo de solicitação:
-
-> Use a skill audio-mixing-mastering-video para analisar meu vídeo, melhorar a inteligibilidade do diálogo e preparar uma entrega para YouTube usando ferramentas Linux headless.
-
-## Normalização em duas passagens
-
-Requer Python 3 e FFmpeg com o filtro `loudnorm`. O comando abaixo cria um novo WAV 24-bit e imprime um relatório JSON. O alvo é apenas um exemplo para fala na web, sujeito à especificação do projeto.
+Requisitos: Python 3.10+, FFmpeg e FFprobe com filtros necessários. O núcleo usa a biblioteca padrão do Python; WebRTC VAD e ferramentas/modelos de IA são opcionais. Os alvos abaixo são exemplos, não requisitos universais.
 
 ```bash
-python3 scripts/normalize_loudness.py entrada.wav saida.wav \
-  --target-i -16 --target-tp -2 --target-lra 11
+python3 scripts/audio_qc.py entrada.wav --target-i -16 --target-tp -2 --strict --report qc.json
+python3 scripts/normalize_loudness.py entrada.wav master.wav --target-i -16 --target-tp -2 --target-lra 11
+python3 scripts/batch_qc.py input/ reports/ --jobs 2 --target-i -16 --target-tp -2 --strict
+python3 -m unittest discover -s tests -v
 ```
 
-O script rejeita entrada silenciosa sem medições válidas, não sobrescreve a saída e bloqueia a troca para normalização dinâmica por padrão. Use `--allow-dynamic` somente se essa alteração for aceitável. Meça o arquivo final codificado também: codec, canais e destino podem mudar o resultado. A análise numérica não substitui a escuta nem certifica conformidade com uma especificação.
+`audio_qc.py --strict` retorna 0 apenas se os dois gates numéricos tiverem alvos e passarem; 2 indica gate falho ou indeterminado e 1, erro. Sem `--strict`, código 0 indica execução concluída, não aprovação. A normalização produz WAV float e rejeita fallback dinâmico por padrão; `--allow-dynamic` só é apropriado se a política permitir. Os scripts não sobrescrevem saídas e nunca modificam o original.
 
-A documentação operacional, os critérios e exemplos de Docker, FFmpeg e lotes estão em `references/automacao-headless.md`. Padrões e referências estão em `references/loudness-entrega.md`; confirme sempre a edição mais recente e a especificação do destinatário.
+Consulte [automação headless](references/automacao-headless.md), [detecção e correção](references/deteccao-correcao.md), [ferramentas de IA](references/ferramentas-ai.md), [arquitetura enterprise](references/arquitetura-enterprise.md) e [loudness e entrega](references/loudness-entrega.md). Teste com mídia real e perfis de contrato antes de uso operacional.
 
 ## Licença
 
-[MIT](LICENSE). Ferramentas, modelos, artigos e normas de terceiros citados ou utilizados são independentes e mantêm suas próprias licenças e condições.
+[MIT](LICENSE). Ferramentas, modelos e normas de terceiros têm licenças e condições próprias.

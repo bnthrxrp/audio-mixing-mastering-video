@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/audio/handoff-v1.schema.json",
+  "title": "Audio agent hand-off envelope",
+  "type": "object",
+  "required": ["schema_version", "job_id", "stage", "input_sha256", "profile_sha256", "status", "evidence", "gaps"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "job_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "stage": {"enum": ["intake", "analysis", "loudness", "speech", "enhancement", "correction", "qa", "export"]},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "profile_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "status": {"enum": ["pass", "fail", "warning", "indeterminate", "not_evaluated"]},
+    "evidence": {"type": "array", "items": {"type": "object", "required": ["metric", "value", "method"], "properties": {"metric": {"type": "string"}, "value": {}, "unit": {"type": ["string", "null"]}, "method": {"type": "string"}}}},
+    "gaps": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}
