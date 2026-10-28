@@ -81,7 +81,10 @@ def main():
         after = scan(after_meta, a.timeout, a.max_seconds)
         if (after_meta['channels'] != source['channels'] or after_meta['sample_rate'] != source['sample_rate'] or
             abs(after['duration_s'] - before['duration_s']) > 0.05):
-            raise AudioError('output channels, sample rate or duration changed; candidate rejected')
+            raise AudioError('candidate properties changed: '
+                f"channels {source['channels']}→{after_meta['channels']}, "
+                f"rate {source['sample_rate']}→{after_meta['sample_rate']}, "
+                f"duration {before['duration_s']:.3f}→{after['duration_s']:.3f}s")
         n = min(len(activity), len(before['frames']), len(after['frames']))
         changes = [level(after['frames'][i]) - level(before['frames'][i]) for i in range(n)]
         voiced = [changes[i] for i in range(n) if activity[i] and level(before['frames'][i]) > -90]
